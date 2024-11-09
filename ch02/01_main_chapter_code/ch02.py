@@ -153,7 +153,7 @@ tokenizer.decode(tokenizer.encode(text))                                      #(
 
 
 """
-4.BytePair encoding(BPE):分词器编码:允许对未知单词进行拆分
+4.BytePair encoding(BPE):分词器编码（字节对编码）:允许对未知单词进行拆分
 
 实验中采用了tiktoken开源库里的分词器（利用优化算法比原始的GPT-2的BPR分词器效率高5倍）
 """
