@@ -92,6 +92,10 @@ print("Previous 2nd context vector:", context_vec_2)                   #之前�
 
 """
 2.用自注意力机制处理input embedding(有可训练的权重)
+
+Q、K、V三个矩阵
+Q@K得到注意力分数      归一化得注意力权重
+context向量 = 注意力权重@V
 """
 
 ### 2.1 逐步计算注意力权重
@@ -108,5 +112,279 @@ W_value = torch.nn.Parameter(torch.rand(d_in, d_out), requires_grad=False)#设�
 
 query_2 = x_2 @ W_query                                                # 关于第二个embedding的query向量
 key_2 = x_2 @ W_key                                                    # 关于第二个embedding的key向量
-value_2 = x_2 @ W_value                                                #关于第二个embedding的value向量
-print(query_2)                                                         #（tensor([0.4306, 1.4551])）
+value_2 = x_2 @ W_value                                                # 关于第二个embedding的value向量
+print(query_2)                                                         # 将一个原始的三维向量转化为二维的上下文向量（tensor([0.4306, 1.4551])）
+
+keys = inputs @ W_key                                                  #同样获取整个input向量的key向量矩阵
+values = inputs @ W_value                                              #获取整个input向量的value向量矩阵
+print("keys.shape:", keys.shape)                                       #(keys.shape: torch.Size([6, 2]))
+print("values.shape:", values.shape)                                   #(values.shape: torch.Size([6, 2]))
+
+keys_2 = keys[1]              
+attn_score_22 = query_2.dot(keys_2)                                    #第二个向量的注意力分数
+print(attn_score_22)                                                   #（tensor(1.8524)）
+
+attn_scores_2 = query_2 @ keys.T                                       #第二个元素的注意力分数矩阵
+print(attn_scores_2)                                                   #（tensor([1.2705, 1.8524, 1.8111, 1.0795, 0.5577, 1.5440])）
+
+d_k = keys.shape[1]                                                    #用注意力分数的维度的平方根对注意力分数进行一个缩放
+attn_weights_2 = torch.softmax(attn_scores_2 / d_k**0.5, dim=-1)       #在最后一个维度求注意力权重
+print(attn_weights_2)                                                  #（tensor([0.1500, 0.2264, 0.2199, 0.1311, 0.0906, 0.1820])）
+
+context_vec_2 = attn_weights_2 @ values                                #将的得到的注意力权重与对应values相乘
+print(context_vec_2)                                                   #(tensor([0.3061, 0.8210]))
+
+
+
+### 2.2 一个完整的自注意力层
+import torch.nn as nn
+
+class SelfAttention_v1(nn.Module):
+
+    def __init__(self, d_in, d_out):
+        super().__init__()                                           #初始化
+        self.W_query = nn.Parameter(torch.rand(d_in, d_out))         #设置q矩阵
+        self.W_key   = nn.Parameter(torch.rand(d_in, d_out))         #key矩阵
+        self.W_value = nn.Parameter(torch.rand(d_in, d_out))         #value矩阵
+
+    def forward(self, x):
+        keys = x @ self.W_key                                        #计算key向量
+        queries = x @ self.W_query                                   #计算query向量
+        values = x @ self.W_value                                    #计算value向量
+        
+        attn_scores = queries @ keys.T # omega                       #q*k得注意力分数 
+        attn_weights = torch.softmax(                                #归一化的注意力权重
+            attn_scores / keys.shape[-1]**0.5, dim=-1
+        )
+
+        context_vec = attn_weights @ values                          #得context向量
+        return context_vec
+
+torch.manual_seed(123)
+sa_v1 = SelfAttention_v1(d_in, d_out)
+print(sa_v1(inputs))
+
+
+
+class SelfAttention_v2(nn.Module):                                 #另一种自注意力的实现
+
+    def __init__(self, d_in, d_out, qkv_bias=False):               #禁用bias则视为矩阵乘法
+        super().__init__()              
+        self.W_query = nn.Linear(d_in,d_out, bias=qkv_bias)        #用线性层Linear
+        self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+
+    def forward(self, x):
+        keys = self.W_key(x)                                       #向线性层传入一个值，就实现了上述的矩阵乘法功能
+        queries = self.W_query(x)
+        values = self.W_value(x)
+        
+        attn_scores = queries @ keys.T                            #注意力分数
+        attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)#注意力权重
+
+        context_vec = attn_weights @ values                       #上下文向量
+        return context_vec
+
+torch.manual_seed(789)
+sa_v2 = SelfAttention_v2(d_in, d_out)                             #即使设置一样的随机数种子，不同类别的随机数还是不一样的
+print(sa_v2(inputs))
+
+
+"""
+3.使用因果注意力（相对于之前得自注意力）来隐藏未来的词语
+
+只考虑和自己前面的词的关系
+
+将注意力权重矩阵上三角置0，或将注意力分数矩阵上三角置-∞
+再使用dropout层（dropoout还可以防止过拟合）                  ->只用于训练过程，推理过程中不使用
+"""
+
+
+### 3.1 将注意力权重矩阵上三角置0，或将注意力分数矩阵上三角置-∞
+
+queries = sa_v2.W_query(inputs)                                              #获取q
+keys = sa_v2.W_key(inputs)                                                   #获取k
+attn_scores = queries @ keys.T                                               #相乘的注意力分数
+attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)      #归一化的注意力矩阵
+print(attn_weights)                                                          #（6*6的矩阵）
+ 
+context_length = attn_scores.shape[0]
+mask_simple = torch.tril(torch.ones(context_length, context_length))         #利用tril函数生成掩码（对角线和它的下面都是1，下面都是0）
+print(mask_simple)                                                           #下三角矩阵
+
+masked_simple = attn_weights*mask_simple                                     #直接相乘将原注意力权重矩阵对角线上面的变为0
+print(masked_simple)
+#这种方法让归一化后的矩阵每一行的和又不是1了
+
+row_sums = masked_simple.sum(dim=-1, keepdim=True)
+masked_simple_norm = masked_simple / row_sums                                #每一行再除以这一行的总和，重归一
+print(masked_simple_norm)                 
+
+#另一种更有效的掩码策略，将注意力分数矩阵的上三角区域置为-∞
+mask = torch.triu(torch.ones(context_length, context_length), diagonal=1)    #加了diagonal=-1后变成了一个上三角矩阵
+masked = attn_scores.masked_fill(mask.bool(), -torch.inf)                    #将原来mask矩阵为1的部分填-∞
+print(masked)
+
+attn_weights = torch.softmax(masked / keys.shape[-1]**0.5, dim=-1)           #再归一化得注意力权重矩阵
+print(attn_weights)
+
+
+
+### 3.2 使用dropout掩盖过度的注意力，防止过拟合
+
+torch.manual_seed(123)
+dropout = torch.nn.Dropout(0.5)                                             #设置一个dropout层，比为0.5
+example = torch.ones(6, 6)                                                  # 设置一个全一的矩阵
+print(dropout(example))                                                     #随机将一半的置置为0，其他的值放大为原来的两别
+
+torch.manual_seed(123)
+print(dropout(attn_weights))                                                #对注意力权重进行dropout
+
+
+### 3.3 实现一个完整的因果注意力层(支持批次输入)
+
+batch = torch.stack((inputs, inputs), dim=0)                                #创建一个批次的数据（将两个input向量，在另一个维度进行堆叠）
+print(batch.shape)                                                          #（torch.Size([2, 6, 3])）
+
+
+class CausalAttention(nn.Module):                                          
+
+    def __init__(self, d_in, d_out, context_length,
+                 dropout, qkv_bias=False):
+        super().__init__()
+        self.d_out = d_out                                                 #dropout率
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)               #q矩阵
+        self.W_key   = nn.Linear(d_in, d_out, bias=qkv_bias)               #k矩阵
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)               #v矩阵
+        self.dropout = nn.Dropout(dropout)                                 #dropout层
+        self.register_buffer('mask', torch.triu(torch.ones(context_length, context_length), diagonal=1)) # New
+                                                                           #注册一个缓冲区，不作为模型参数，设置一个掩码矩阵
+    def forward(self, x):
+        b, num_tokens, d_in = x.shape # New batch dimension b              #获取一个批次的所有信息
+        keys = self.W_key(x)                                               #key
+        queries = self.W_query(x)                                          #query
+        values = self.W_value(x)                                           #value
+
+        attn_scores = queries @ keys.transpose(1, 2)                       #注意力分数 transpose(1, 2)将第一维和第二维交换
+        attn_scores.masked_fill_(                                          #将注意力分数进行一个掩码
+            self.mask.bool()[:num_tokens, :num_tokens], -torch.inf) 
+        attn_weights = torch.softmax(                                      #归一化的注意力权重
+            attn_scores / keys.shape[-1]**0.5, dim=-1
+        )
+        attn_weights = self.dropout(attn_weights)                          #通过dropout层
+
+        context_vec = attn_weights @ values                                #得到context向量
+        return context_vec    
+ 
+torch.manual_seed(123)                                                     #设置随机数种子
+context_length = batch.shape[1]                                            #批次中输入的长度
+ca = CausalAttention(d_in, d_out, context_length, 0.0)
+context_vecs = ca(batch)                                                   
+print(context_vecs)
+print("context_vecs.shape:", context_vecs.shape)
+
+
+"""
+4.多头注意力层
+
+直接堆叠单头注意力层
+"""
+
+
+### 4.1 堆叠单头注意力层
+
+class MultiHeadAttentionWrapper(nn.Module):
+    def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
+        super().__init__()
+        self.heads = nn.ModuleList(                                                             #设置一系列的因果注意力层
+            [CausalAttention(d_in, d_out, context_length, dropout, qkv_bias) 
+             for _ in range(num_heads)]
+        )
+
+    def forward(self, x):
+        return torch.cat([head(x) for head in self.heads], dim=-1)                             #输入会独立经过多个注意力层，然后在最后一个维度进行拼接    
+
+
+torch.manual_seed(123)                                                                         #设置随机数种子
+context_length = batch.shape[1]                                                                # This is the number of tokens 
+d_in, d_out = 3, 2
+mha = MultiHeadAttentionWrapper(
+    d_in, d_out, context_length, 0.0, num_heads=2
+)
+
+context_vecs = mha(batch)
+print(context_vecs)
+print("context_vecs.shape:", context_vecs.shape)                                               #相当于两个经过注意力层后的input堆叠而成
+
+
+### 4.2 权重分割（重复上述的步骤，不再调用CausalAttention）
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False):
+        super().__init__()
+        assert (d_out % num_heads == 0), \
+            "d_out must be divisible by num_heads"                                             #输出一定要可以被head数目拆分
+
+        self.d_out = d_out
+        self.num_heads = num_heads
+        self.head_dim = d_out // num_heads                                                    # Reduce the projection dim to match desired output dim
+
+        self.W_query = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_key = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.W_value = nn.Linear(d_in, d_out, bias=qkv_bias)
+        self.out_proj = nn.Linear(d_out, d_out)                                              # 将最后的答案通过这个线性层，进行整合
+        self.dropout = nn.Dropout(dropout)
+        self.register_buffer(
+            "mask",
+            torch.triu(torch.ones(context_length, context_length),
+                       diagonal=1)
+        )
+
+    def forward(self, x):
+        b, num_tokens, d_in = x.shape
+
+        keys = self.W_key(x)                                                                # Shape: (b, num_tokens, d_out)
+        queries = self.W_query(x)
+        values = self.W_value(x)
+
+        # We implicitly split the matrix by adding a `num_heads` dimension
+        # Unroll last dim: (b, num_tokens, d_out) -> (b, num_tokens, num_heads, head_dim)
+        keys = keys.view(b, num_tokens, self.num_heads, self.head_dim)                     #把d_out拆分为了多个注意力头
+        values = values.view(b, num_tokens, self.num_heads, self.head_dim)
+        queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
+
+        # Transpose: (b, num_tokens, num_heads, head_dim) -> (b, num_heads, num_tokens, head_dim)
+        keys = keys.transpose(1, 2)
+        queries = queries.transpose(1, 2)
+        values = values.transpose(1, 2)
+
+        # Compute scaled dot-product attention (aka self-attention) with a causal mask
+        attn_scores = queries @ keys.transpose(2, 3)  # Dot product for each head
+
+        # Original mask truncated to the number of tokens and converted to boolean
+        mask_bool = self.mask.bool()[:num_tokens, :num_tokens]
+
+        # Use the mask to fill attention scores
+        attn_scores.masked_fill_(mask_bool, -torch.inf)
+        
+        attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Shape: (b, num_tokens, num_heads, head_dim)
+        context_vec = (attn_weights @ values).transpose(1, 2) 
+        
+        # Combine heads, where self.d_out = self.num_heads * self.head_dim
+        context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
+        context_vec = self.out_proj(context_vec)                                           #将最后得到的结果再进行一个线性的转化，并不是必须的
+
+        return context_vec
+
+torch.manual_seed(123)
+
+batch_size, context_length, d_in = batch.shape
+d_out = 2
+mha = MultiHeadAttention(d_in, d_out, context_length, 0.0, num_heads=2)
+
+context_vecs = mha(batch)
+print(context_vecs)
+print("context_vecs.shape:", context_vecs.shape)
