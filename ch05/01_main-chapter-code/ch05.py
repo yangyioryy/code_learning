@@ -504,8 +504,147 @@ print("Output text:\n", token_ids_to_text(token_ids, tokenizer))          #（ E
 
 
 """
-4.在朋友torch中加载和保存模型的权重
+4.在朋友torch中加载和保存模型的训练过程中的权重
 
 torch.save 函数应用于 .state_dict() 方法来保存模型权重
 """
+
 torch.save(model.state_dict(), "model.pth")                               # 保存权重
+
+model = GPTModel(GPT_CONFIG_124M)                                         # 再初始化一个模型
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")     #设定训练的设备
+model.load_state_dict(torch.load("model.pth", map_location=device, weights_only=True))#直接把模型保存的权重加载到另一个模型中
+model.eval();                                                             # 设置为评估模式
+
+torch.save({                                                              # 将模型和优化器的状态字典保存到一个文件中
+    "model_state_dict": model.state_dict(),                               # 保存模型的参数状态字典
+    "optimizer_state_dict": optimizer.state_dict(),                       # 保存优化器的参数状态字典
+    },
+    "model_and_optimizer.pth"                                             # 指定保存的文件名
+)
+
+checkpoint = torch.load("model_and_optimizer.pth", weights_only=True)     # 加载保存的文件，weights_only指定是否只加载权重
+model = GPTModel(GPT_CONFIG_124M)                                         # 初始化一个GPT模型实例
+model.load_state_dict(checkpoint["model_state_dict"])                     # 将保存的模型参数加载到模型实例中
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=0.1)  # 使用AdamW优化器初始化
+optimizer.load_state_dict(checkpoint["optimizer_state_dict"])             # 加载保存的优化器参数到优化器实例中
+model.train()                                                             # 将模型设置为训练模式
+
+
+"""
+5.使用OpenAI的预训练权重
+
+使用gpt2的开源的预训练的权重参数,下载之后还需要手动进行相应的配置
+"""
+
+# pip install tensorflow tqdm                                             # tensorflow是openai用于加载权重的库，tqdm是显示进度条的库
+print("TensorFlow version:", version("tensorflow"))                       # 检测
+print("tqdm version:", version("tqdm"))
+
+# Relative import from the gpt_download.py contained in this folder
+from gpt_download import download_and_load_gpt2                           # 其他一些依赖库
+settings, params = download_and_load_gpt2(model_size="124M", models_dir="gpt2")#开始导入gpt2的权重参数
+print("Settings:", settings)                                              #（Settings: {'n_vocab': 50257, 'n_ctx': 1024, 'n_embd': 768, 'n_head': 12, 'n_layer': 12}）
+print("Parameter dictionary keys:", params.keys())                        # 模型参数的key（Parameter dictionary keys: dict_keys(['blocks', 'b', 'g', 'wpe', 'wte'])）
+print(params["wte"])
+print("Token embedding weight tensor dimensions:", params["wte"].shape)   # （Token embedding weight tensor dimensions: (50257, 768)）
+
+
+# 定义模型配置字典，用于紧凑地管理不同GPT模型的参数设置
+model_configs = {
+    "gpt2-small (124M)": {"emb_dim": 768, "n_layers": 12, "n_heads": 12},  # gpt2-small模型的配置
+    "gpt2-medium (355M)": {"emb_dim": 1024, "n_layers": 24, "n_heads": 16},# gpt2-medium模型的配置
+    "gpt2-large (774M)": {"emb_dim": 1280, "n_layers": 36, "n_heads": 20}, # gpt2-large模型的配置
+    "gpt2-xl (1558M)": {"emb_dim": 1600, "n_layers": 48, "n_heads": 25},   # gpt2-xl模型的配置
+}
+
+# 复制基础配置并更新为指定模型的具体设置
+model_name = "gpt2-small (124M)"                                           # 示例使用gpt2-small模型
+NEW_CONFIG = GPT_CONFIG_124M.copy()                                        # 复制基础配置
+NEW_CONFIG.update(model_configs[model_name])                               # 更新为指定模型的配置
+NEW_CONFIG.update({"context_length": 1024, "qkv_bias": True})              # 增加上下文长度和QKV偏置设置
+gpt = GPTModel(NEW_CONFIG)                                                 # 使用更新后的配置初始化GPT模型
+gpt.eval()                                                                 # 将模型设置为推理模式
+
+# 定义参数赋值函数
+def assign(left, right):  
+    if left.shape != right.shape:                                          # 检查左右参数形状是否匹配
+        raise ValueError(f"Shape mismatch. Left: {left.shape}, Right: {right.shape}")  # 报错不匹配的情况
+    return torch.nn.Parameter(torch.tensor(right))                         # 转换为torch参数并返回
+
+import numpy as np  # 导入numpy库
+
+# 定义将参数加载到GPT模型中的函数
+def load_weights_into_gpt(gpt, params):
+    gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params['wpe'])          # 加载位置嵌入参数
+    gpt.tok_emb.weight = assign(gpt.tok_emb.weight, params['wte'])          # 加载词嵌入参数
+
+    for b in range(len(params["blocks"])):                                  # 遍历每个transformer block
+        q_w, k_w, v_w = np.split(
+            (params["blocks"][b]["attn"]["c_attn"])["w"], 3, axis=-1)       # 分割查询、键和值的权重
+        gpt.trf_blocks[b].att.W_query.weight = assign(
+            gpt.trf_blocks[b].att.W_query.weight, q_w.T)                    # 加载查询权重
+        gpt.trf_blocks[b].att.W_key.weight = assign(
+            gpt.trf_blocks[b].att.W_key.weight, k_w.T)                      # 加载键权重
+        gpt.trf_blocks[b].att.W_value.weight = assign(
+            gpt.trf_blocks[b].att.W_value.weight, v_w.T)                    # 加载值权重
+
+        q_b, k_b, v_b = np.split(
+            (params["blocks"][b]["attn"]["c_attn"])["b"], 3, axis=-1)       # 分割查询、键和值的偏置
+        gpt.trf_blocks[b].att.W_query.bias = assign(
+            gpt.trf_blocks[b].att.W_query.bias, q_b)                        # 加载查询偏置
+        gpt.trf_blocks[b].att.W_key.bias = assign(
+            gpt.trf_blocks[b].att.W_key.bias, k_b)                          # 加载键偏置
+        gpt.trf_blocks[b].att.W_value.bias = assign(
+            gpt.trf_blocks[b].att.W_value.bias, v_b)                        # 加载值偏置
+
+        gpt.trf_blocks[b].att.out_proj.weight = assign(
+            gpt.trf_blocks[b].att.out_proj.weight,
+            params["blocks"][b]["attn"]["c_proj"]["w"].T)                   # 加载输出投影权重
+        gpt.trf_blocks[b].att.out_proj.bias = assign(
+            gpt.trf_blocks[b].att.out_proj.bias,
+            params["blocks"][b]["attn"]["c_proj"]["b"])                     # 加载输出投影偏置
+
+        gpt.trf_blocks[b].ff.layers[0].weight = assign(
+            gpt.trf_blocks[b].ff.layers[0].weight,
+            params["blocks"][b]["mlp"]["c_fc"]["w"].T)                       # 加载前馈网络第一个全连接层权重
+        gpt.trf_blocks[b].ff.layers[0].bias = assign(
+            gpt.trf_blocks[b].ff.layers[0].bias,
+            params["blocks"][b]["mlp"]["c_fc"]["b"])                         # 加载第一个全连接层偏置
+        gpt.trf_blocks[b].ff.layers[2].weight = assign(
+            gpt.trf_blocks[b].ff.layers[2].weight,
+            params["blocks"][b]["mlp"]["c_proj"]["w"].T)                     # 加载第二个全连接层权重
+        gpt.trf_blocks[b].ff.layers[2].bias = assign(
+            gpt.trf_blocks[b].ff.layers[2].bias,
+            params["blocks"][b]["mlp"]["c_proj"]["b"])                       # 加载第二个全连接层偏置
+
+        gpt.trf_blocks[b].norm1.scale = assign(
+            gpt.trf_blocks[b].norm1.scale,
+            params["blocks"][b]["ln_1"]["g"])                                # 加载第一个规范化层的缩放参数
+        gpt.trf_blocks[b].norm1.shift = assign(
+            gpt.trf_blocks[b].norm1.shift,
+            params["blocks"][b]["ln_1"]["b"])                                # 加载第一个规范化层的偏移参数
+        gpt.trf_blocks[b].norm2.scale = assign(
+            gpt.trf_blocks[b].norm2.scale,
+            params["blocks"][b]["ln_2"]["g"])                                # 加载第二个规范化层的缩放参数
+        gpt.trf_blocks[b].norm2.shift = assign(
+            gpt.trf_blocks[b].norm2.shift,
+            params["blocks"][b]["ln_2"]["b"])                                # 加载第二个规范化层的偏移参数
+
+    gpt.final_norm.scale = assign(gpt.final_norm.scale, params["g"])         # 加载最终规范化层的缩放参数
+    gpt.final_norm.shift = assign(gpt.final_norm.shift, params["b"])         # 加载最终规范化层的偏移参数
+    gpt.out_head.weight = assign(gpt.out_head.weight, params["wte"])         # 加载输出层权重
+
+# 将权重加载到GPT模型中
+load_weights_into_gpt(gpt, params)  
+gpt.to(device)                                                               # 将模型加载到设备上（如GPU或CPU）
+torch.manual_seed(123)                                                       # 设置随机种子以保证生成结果可重复
+token_ids = generate(                                                        # 调用生成函数
+    model=gpt,                                                               # 使用加载了权重的GPT模型
+    idx=text_to_token_ids("Every effort moves you", tokenizer).to(device),   # 将初始文本转换为token ID
+    max_new_tokens=25,                                                       # 最大生成的token数
+    context_size=NEW_CONFIG["context_length"],                               # 使用模型的上下文长度
+    top_k=50,                                                                # 使用Top-K采样
+    temperature=1.5                                                          # 设置温度参数影响多样性
+)
+print("Output text:\n", token_ids_to_text(token_ids, tokenizer))             #(Every effort moves you as far as the hand can go until the end of your turn unless something happens)
